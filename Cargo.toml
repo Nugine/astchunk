@@ -1,0 +1,19 @@
+[package]
+name = "astchunk"
+version = "0.0.1"
+edition = "2024"
+description = "AST-based code chunking for RAG"
+license = "MIT"
+repository = "https://github.com/Nugine/astchunk"
+keywords = ["ast", "chunking", "rag", "code"]
+categories = ["text-processing", "development-tools"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+[dependencies]
