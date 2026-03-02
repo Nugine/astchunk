@@ -31,12 +31,6 @@ impl<'tree> AstNode<'tree> {
         }
     }
 
-    /// Byte range of this node in the source code.
-    #[must_use]
-    pub fn byte_range(&self) -> ByteRange {
-        ByteRange::from_ts_node(&self.node)
-    }
-
     /// 0-indexed start line.
     #[must_use]
     pub fn start_line(&self) -> u32 {
@@ -72,12 +66,6 @@ impl<'tree> AstNode<'tree> {
         let end = self.node.end_byte();
         std::str::from_utf8(&source[start..end]).expect("node text is not valid UTF-8")
     }
-
-    /// Number of lines covered by this node.
-    #[must_use]
-    pub fn line_count(&self) -> u32 {
-        self.end_line() - self.start_line() + 1
-    }
 }
 
 /// Compute the non-whitespace size of a tree-sitter node using the cumulative sum.
@@ -92,7 +80,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_ast_node_properties() {
         let code = "def foo():\n    return 42\n";
         let source = code.as_bytes();
@@ -118,7 +105,6 @@ mod tests {
         assert_eq!(ast_node.start_line(), 0);
         assert_eq!(ast_node.end_line(), 1);
         assert_eq!(ast_node.start_col(), 0);
-        assert_eq!(ast_node.line_count(), 2);
         assert!(ast_node.nws_size > 0);
         assert_eq!(ast_node.text(source), "def foo():\n    return 42");
         assert_eq!(ast_node.ancestors.len(), 1);

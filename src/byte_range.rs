@@ -22,18 +22,6 @@ impl ByteRange {
         Self { start, end }
     }
 
-    /// Returns `true` if `self` fully contains `other`.
-    #[must_use]
-    pub fn contains_range(self, other: Self) -> bool {
-        self.start <= other.start && self.end >= other.end
-    }
-
-    /// Returns `true` if the two ranges have a non-zero intersection.
-    #[must_use]
-    pub fn overlaps(self, other: Self) -> bool {
-        self.start.max(other.start) < self.end.min(other.end)
-    }
-
     /// Creates a byte range from a tree-sitter node's byte offsets.
     #[must_use]
     pub fn from_ts_node(node: &tree_sitter::Node<'_>) -> Self {
@@ -54,28 +42,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_byte_range_contains() {
-        let outer = ByteRange::new(0, 10);
-        let inner = ByteRange::new(2, 8);
-        let partial = ByteRange::new(5, 15);
-        let same = ByteRange::new(0, 10);
-
-        assert!(outer.contains_range(inner));
-        assert!(!outer.contains_range(partial));
-        assert!(outer.contains_range(same));
-        assert!(!inner.contains_range(outer));
+    fn test_byte_range_new() {
+        let range = ByteRange::new(5, 10);
+        assert_eq!(range.start, 5);
+        assert_eq!(range.end, 10);
     }
 
     #[test]
-    fn test_byte_range_overlaps() {
-        let a = ByteRange::new(0, 10);
-        let b = ByteRange::new(5, 15);
-        let c = ByteRange::new(10, 20);
-        let d = ByteRange::new(0, 0);
-
-        assert!(a.overlaps(b));
-        assert!(b.overlaps(a));
-        assert!(!a.overlaps(c)); // [0,10) and [10,20) don't overlap
-        assert!(!a.overlaps(d)); // empty range
+    #[should_panic(expected = "Invalid ByteRange")]
+    fn test_byte_range_invalid() {
+        let _ = ByteRange::new(10, 5);
     }
 }

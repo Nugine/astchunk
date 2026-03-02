@@ -21,23 +21,24 @@ name = "astchunk"
 required-features = ["cli"]
 
 [features]
-default = ["python"]
-cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:chrono"]
-python = ["dep:tree-sitter-python"]
-java = ["dep:tree-sitter-java"]
-csharp = ["dep:tree-sitter-c-sharp"]
-typescript = ["dep:tree-sitter-typescript"]
-all-languages = ["python", "java", "csharp", "typescript"]
+cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:chrono", "dep:comfy-table", "dep:ignore", "dep:rayon", "dep:mimalloc"]
 
 [dependencies]
-tree-sitter = "0.25"
-tree-sitter-python = { version = "0.23", optional = true }
-tree-sitter-java = { version = "0.23", optional = true }
-tree-sitter-c-sharp = { version = "0.23", optional = true }
-tree-sitter-typescript = { version = "0.23", optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+camino = "1.2.2"
+tree-sitter = "0.26.6"
+tree-sitter-python = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.1"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-rust = "0.24.0"
+tree-sitter-typescript = "0.23.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 clap = { version = "4.5.60", features = ["derive"], optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "chrono"], optional = true }
 chrono = { version = "0.4.44", optional = true }
+comfy-table = { version = "7.2.2", optional = true }
+ignore = { version = "0.4.25", optional = true }
+rayon = { version = "1.11.0", optional = true }
+mimalloc = { version = "0.1.48", optional = true }

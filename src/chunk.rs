@@ -1,4 +1,3 @@
-use crate::byte_range::ByteRange;
 use crate::lang::Language;
 use crate::node::AstNode;
 use crate::nws::nws_count_direct;
@@ -12,8 +11,6 @@ use crate::nws::nws_count_direct;
 pub struct AstChunk {
     /// Rebuilt source code text for this chunk.
     pub text: String,
-    /// Byte range in the original source `[start, end)`.
-    pub byte_range: ByteRange,
     /// 0-indexed start line.
     pub start_line: u32,
     /// 0-indexed end line.
@@ -120,10 +117,6 @@ pub fn build_chunk(window: &[AstNode<'_>], source: &[u8], language: Language) ->
     let text = rebuild_code(window, source);
     let size = nws_count_direct(&text);
 
-    let byte_range = ByteRange::new(
-        window.first().unwrap().byte_range().start,
-        window.last().unwrap().byte_range().end,
-    );
     let start_line = window.first().unwrap().start_line();
     let end_line = window.last().unwrap().end_line();
     let node_count = window.len();
@@ -131,7 +124,6 @@ pub fn build_chunk(window: &[AstNode<'_>], source: &[u8], language: Language) ->
 
     AstChunk {
         text,
-        byte_range,
         start_line,
         end_line,
         size,
@@ -147,7 +139,6 @@ mod tests {
     use crate::nws::NwsCumsum;
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_rebuild_code_simple() {
         let code = "x = 1\ny = 2\n";
         let source = code.as_bytes();
@@ -174,7 +165,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_rebuild_code_indented() {
         let code = "def foo():\n    x = 1\n    y = 2\n";
         let source = code.as_bytes();
@@ -207,7 +197,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_build_chunk_ancestors() {
         let code = "class MyClass:\n    def method(self):\n        pass\n";
         let source = code.as_bytes();
@@ -234,7 +223,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_build_chunk() {
         let code = "x = 1\ny = 2\nz = 3\n";
         let source = code.as_bytes();

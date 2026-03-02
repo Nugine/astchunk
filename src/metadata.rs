@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::AstChunk;
@@ -16,6 +14,21 @@ pub enum MetadataTemplate {
     CodeRagBenchRepoEval,
     /// `CodeRAGBench` SWE-bench Lite template.
     CodeRagBenchSwebenchLite,
+}
+
+/// Repository-level metadata used in chunk output formatting.
+#[derive(Debug, Clone, Default)]
+pub struct RepoMetadata {
+    /// File path (used by Default template).
+    pub filepath: String,
+    /// Forward-slash–separated path tuple (used by `RepoEval` template).
+    pub fpath_tuple: String,
+    /// Repository name (used by `RepoEval` template).
+    pub repo: String,
+    /// Instance identifier (used by SWE-bench Lite template).
+    pub instance_id: String,
+    /// File name (used by SWE-bench Lite template).
+    pub filename: String,
 }
 
 /// A serializable output code window.
@@ -40,53 +53,43 @@ pub enum CodeWindow {
     },
 }
 
-/// Options for the chunking process.
-#[derive(Debug, Clone, Default)]
-pub struct ChunkOptions {
-    /// Number of `AstNode`s to overlap between adjacent windows (default: 0).
-    pub chunk_overlap: usize,
-    /// Whether to add ancestry context header to each chunk (default: false).
-    pub chunk_expansion: bool,
-    /// Repository-level metadata (e.g., filepath, repo, `instance_id`, filename).
-    pub repo_metadata: HashMap<String, String>,
-}
-
 /// Build the metadata for a chunk according to the template.
 pub fn build_metadata(
     chunk: &AstChunk,
     template: MetadataTemplate,
-    repo_metadata: &HashMap<String, String>,
+    repo_metadata: &RepoMetadata,
 ) -> CodeWindow {
     match template {
         MetadataTemplate::None => CodeWindow::Standard {
             content: chunk.text.clone(),
             metadata: serde_json::json!({}),
         },
-        MetadataTemplate::Default => {
-            let filepath = repo_metadata.get("filepath").cloned().unwrap_or_default();
-            CodeWindow::Standard {
-                content: chunk.text.clone(),
-                metadata: serde_json::json!({
-                    "filepath": filepath,
-                    "chunk_size": chunk.size,
-                    "line_count": chunk.line_count(),
-                    "start_line_no": chunk.start_line,
-                    "end_line_no": chunk.end_line,
-                    "node_count": chunk.node_count,
-                }),
-            }
-        }
+        MetadataTemplate::Default => CodeWindow::Standard {
+            content: chunk.text.clone(),
+            metadata: serde_json::json!({
+                "filepath": repo_metadata.filepath,
+                "chunk_size": chunk.size,
+                "line_count": chunk.line_count(),
+                "start_line_no": chunk.start_line,
+                "end_line_no": chunk.end_line,
+                "node_count": chunk.node_count,
+            }),
+        },
         MetadataTemplate::CodeRagBenchRepoEval => {
-            let fpath_tuple: Vec<String> = repo_metadata
-                .get("fpath_tuple")
-                .map(|s| s.split('/').map(String::from).collect())
-                .unwrap_or_default();
-            let repo = repo_metadata.get("repo").cloned().unwrap_or_default();
+            let fpath_tuple: Vec<String> = if repo_metadata.fpath_tuple.is_empty() {
+                Vec::new()
+            } else {
+                repo_metadata
+                    .fpath_tuple
+                    .split('/')
+                    .map(String::from)
+                    .collect()
+            };
             CodeWindow::Standard {
                 content: chunk.text.clone(),
                 metadata: serde_json::json!({
                     "fpath_tuple": fpath_tuple,
-                    "repo": repo,
+                    "repo": repo_metadata.repo,
                     "chunk_size": chunk.size,
                     "line_count": chunk.line_count(),
                     "start_line_no": chunk.start_line,
@@ -96,15 +99,13 @@ pub fn build_metadata(
             }
         }
         MetadataTemplate::CodeRagBenchSwebenchLite => {
-            let instance_id = repo_metadata
-                .get("instance_id")
-                .cloned()
-                .unwrap_or_default();
-            let filename = repo_metadata.get("filename").cloned().unwrap_or_default();
-            let id = format!("{}_{}-{}", instance_id, chunk.start_line, chunk.end_line);
+            let id = format!(
+                "{}_{}-{}",
+                repo_metadata.instance_id, chunk.start_line, chunk.end_line
+            );
             CodeWindow::SwebenchLite {
                 _id: id,
-                title: filename,
+                title: repo_metadata.filename.clone(),
                 text: chunk.text.clone(),
             }
         }
@@ -126,18 +127,13 @@ pub fn build_metadata(
 pub fn apply_chunk_expansion(
     chunk: &mut AstChunk,
     template: MetadataTemplate,
-    repo_metadata: &HashMap<String, String>,
+    repo_metadata: &RepoMetadata,
 ) {
     let filepath = match template {
-        MetadataTemplate::Default => repo_metadata.get("filepath").cloned().unwrap_or_default(),
-        MetadataTemplate::CodeRagBenchRepoEval => repo_metadata
-            .get("fpath_tuple")
-            .cloned()
-            .unwrap_or_default(),
-        MetadataTemplate::CodeRagBenchSwebenchLite => {
-            repo_metadata.get("filename").cloned().unwrap_or_default()
-        }
-        MetadataTemplate::None => String::new(),
+        MetadataTemplate::Default => &repo_metadata.filepath,
+        MetadataTemplate::CodeRagBenchRepoEval => &repo_metadata.fpath_tuple,
+        MetadataTemplate::CodeRagBenchSwebenchLite => &repo_metadata.filename,
+        MetadataTemplate::None => "",
     };
 
     let ancestors_text = chunk
@@ -150,7 +146,7 @@ pub fn apply_chunk_expansion(
 
     let mut expansion = String::from("'''\n");
     if !filepath.is_empty() {
-        expansion.push_str(&filepath);
+        expansion.push_str(filepath);
         expansion.push('\n');
     }
     if !ancestors_text.is_empty() {

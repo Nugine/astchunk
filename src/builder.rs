@@ -2,7 +2,7 @@ use crate::byte_range::ByteRange;
 use crate::chunk::{AstChunk, build_chunk};
 use crate::lang::Language;
 use crate::metadata::{
-    ChunkOptions, CodeWindow, MetadataTemplate, apply_chunk_expansion, build_metadata,
+    CodeWindow, MetadataTemplate, RepoMetadata, apply_chunk_expansion, build_metadata,
 };
 use crate::node::{AstNode, node_nws_size};
 use crate::nws::NwsCumsum;
@@ -11,21 +11,83 @@ use crate::nws::NwsCumsum;
 ///
 /// This is the core algorithm that drives the chunking process, mirroring
 /// the Python `ASTChunkBuilder` class.
+///
+/// # Examples
+///
+/// ```rust
+/// use astchunk::{AstChunkBuilder, Language};
+///
+/// let code = "def hello():\n    print('hello')\n";
+/// let chunks = AstChunkBuilder::new(Language::Python)
+///     .max_chunk_size(1500)
+///     .chunkify(code);
+/// assert!(!chunks.is_empty());
+/// ```
 pub struct AstChunkBuilder {
-    /// Maximum non-whitespace character count per chunk.
-    max_chunk_size: u32,
     /// Programming language.
     language: Language,
+    /// Maximum non-whitespace character count per chunk (default: 1500).
+    max_chunk_size: u32,
+    /// Number of `AstNode`s to overlap between adjacent windows (default: 0).
+    chunk_overlap: usize,
+    /// Whether to add ancestry context header to each chunk (default: false).
+    chunk_expansion: bool,
+    /// Metadata template for chunk output formatting.
+    template: MetadataTemplate,
+    /// Repository-level metadata.
+    repo_metadata: RepoMetadata,
 }
 
 impl AstChunkBuilder {
-    /// Create a new builder.
+    /// Create a new builder for the given programming language.
+    ///
+    /// Uses default settings: `max_chunk_size = 1500`, `chunk_overlap = 0`,
+    /// `chunk_expansion = false`, `template = Default`.
     #[must_use]
-    pub fn new(max_chunk_size: u32, language: Language) -> Self {
+    pub fn new(language: Language) -> Self {
         Self {
-            max_chunk_size,
             language,
+            max_chunk_size: 1500,
+            chunk_overlap: 0,
+            chunk_expansion: false,
+            template: MetadataTemplate::default(),
+            repo_metadata: RepoMetadata::default(),
         }
+    }
+
+    /// Set the maximum non-whitespace character count per chunk.
+    #[must_use]
+    pub fn max_chunk_size(mut self, size: u32) -> Self {
+        self.max_chunk_size = size;
+        self
+    }
+
+    /// Set the number of AST nodes to overlap between adjacent windows.
+    #[must_use]
+    pub fn chunk_overlap(mut self, overlap: usize) -> Self {
+        self.chunk_overlap = overlap;
+        self
+    }
+
+    /// Enable or disable chunk expansion (ancestry context header).
+    #[must_use]
+    pub fn chunk_expansion(mut self, enabled: bool) -> Self {
+        self.chunk_expansion = enabled;
+        self
+    }
+
+    /// Set the metadata template for chunk output formatting.
+    #[must_use]
+    pub fn template(mut self, template: MetadataTemplate) -> Self {
+        self.template = template;
+        self
+    }
+
+    /// Set the repository-level metadata.
+    #[must_use]
+    pub fn repo_metadata(mut self, meta: RepoMetadata) -> Self {
+        self.repo_metadata = meta;
+        self
     }
 
     /// Parse source code and create a tree-sitter parser for the configured language.
@@ -46,7 +108,7 @@ impl AstChunkBuilder {
     /// Handles the edge case where the whole tree fits in one window,
     /// otherwise delegates to [`Self::assign_nodes_to_windows`].
     #[must_use]
-    pub fn assign_tree_to_windows<'tree>(
+    fn assign_tree_to_windows<'tree>(
         &self,
         source: &[u8],
         root_node: tree_sitter::Node<'tree>,
@@ -232,12 +294,7 @@ impl AstChunkBuilder {
     ///
     /// This is the main entry point, equivalent to the Python `chunkify` method.
     #[must_use]
-    pub fn chunkify(
-        &self,
-        code: &str,
-        template: MetadataTemplate,
-        options: &ChunkOptions,
-    ) -> Vec<CodeWindow> {
+    pub fn chunkify(&self, code: &str) -> Vec<CodeWindow> {
         let source = code.as_bytes();
 
         // Step 1: Parse and assign to windows
@@ -245,8 +302,8 @@ impl AstChunkBuilder {
         let ast_windows = self.assign_tree_to_windows(source, tree.root_node());
 
         // Step 2: Optional overlapping
-        let ast_windows = if options.chunk_overlap > 0 {
-            Self::add_window_overlapping(&ast_windows, options.chunk_overlap)
+        let ast_windows = if self.chunk_overlap > 0 {
+            Self::add_window_overlapping(&ast_windows, self.chunk_overlap)
         } else {
             ast_windows
         };
@@ -258,29 +315,28 @@ impl AstChunkBuilder {
             .collect();
 
         // Optional: chunk expansion
-        if options.chunk_expansion {
+        if self.chunk_expansion {
             for chunk in &mut chunks {
-                apply_chunk_expansion(chunk, template, &options.repo_metadata);
+                apply_chunk_expansion(chunk, self.template, &self.repo_metadata);
             }
         }
 
         // Step 4: Convert to output CodeWindows
         chunks
             .iter()
-            .map(|c| build_metadata(c, template, &options.repo_metadata))
+            .map(|c| build_metadata(c, self.template, &self.repo_metadata))
             .collect()
     }
 }
+#[cfg(test)]
 mod tests {
     use super::{AstChunkBuilder, Language};
 
-    #[cfg(feature = "python")]
     fn make_builder(max_chunk_size: u32) -> AstChunkBuilder {
-        AstChunkBuilder::new(max_chunk_size, Language::Python)
+        AstChunkBuilder::new(Language::Python).max_chunk_size(max_chunk_size)
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_small_code_single_window() {
         let code = "x = 1\ny = 2\n";
         let builder = make_builder(1000);
@@ -295,7 +351,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_multiple_functions_split() {
         use std::fmt::Write;
         // Create code large enough to require multiple chunks
@@ -322,7 +377,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_large_function_recursive_split() {
         use std::fmt::Write;
         // A single large function that exceeds max_chunk_size
@@ -356,7 +410,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_window_sizes_respect_limit() {
         use std::fmt::Write;
 
@@ -389,7 +442,8 @@ mod tests {
 
             // Also check each node has correct nws_size
             for node in w {
-                let expected = crate::nws::NwsCumsum::new(code.as_bytes()).get(node.byte_range());
+                let expected = crate::nws::NwsCumsum::new(code.as_bytes())
+                    .get(crate::byte_range::ByteRange::from_ts_node(&node.node));
                 assert_eq!(
                     node.nws_size, expected,
                     "NWS size mismatch for node in window {i}"
@@ -400,14 +454,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_chunkify_end_to_end() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         let code = include_str!("../tests/source_code.txt");
         let builder = make_builder(1800);
-        let options = ChunkOptions::default();
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let windows = builder.chunkify(code);
 
         // Python produces 18 chunks with max_chunk_size=1800
         assert_eq!(
@@ -433,9 +485,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_chunkify_matches_python_sizes() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         // Expected sizes from Python output
         let expected_sizes: &[u64] = &[
@@ -445,8 +496,7 @@ mod tests {
 
         let code = include_str!("../tests/source_code.txt");
         let builder = make_builder(1800);
-        let options = ChunkOptions::default();
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let windows = builder.chunkify(code);
 
         assert_eq!(windows.len(), expected_sizes.len());
 
@@ -462,9 +512,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_chunkify_matches_python_line_counts() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         let expected_lines: &[u64] = &[
             75, 64, 49, 33, 32, 59, 69, 71, 69, 61, 66, 21, 66, 54, 11, 79, 71, 27,
@@ -472,8 +521,7 @@ mod tests {
 
         let code = include_str!("../tests/source_code.txt");
         let builder = make_builder(1800);
-        let options = ChunkOptions::default();
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let windows = builder.chunkify(code);
 
         assert_eq!(windows.len(), expected_lines.len());
 
@@ -489,17 +537,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_chunkify_with_overlap() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         let code = include_str!("../tests/source_code.txt");
-        let builder = make_builder(1800);
-        let options = ChunkOptions {
-            chunk_overlap: 2,
-            ..ChunkOptions::default()
-        };
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let builder = make_builder(1800).chunk_overlap(2);
+        let windows = builder.chunkify(code);
 
         // With overlap, should still get same number of chunks
         assert_eq!(windows.len(), 18);
@@ -512,21 +555,17 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "python")]
     fn test_chunkify_with_expansion() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
-        use std::collections::HashMap;
+        use crate::metadata::{CodeWindow, RepoMetadata};
 
         let code = include_str!("../tests/source_code.txt");
-        let builder = make_builder(1800);
-        let mut repo_metadata = HashMap::new();
-        repo_metadata.insert("filepath".to_string(), "source_code.py".to_string());
-        let options = ChunkOptions {
-            chunk_expansion: true,
-            repo_metadata,
-            ..ChunkOptions::default()
-        };
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let builder = make_builder(1800)
+            .chunk_expansion(true)
+            .repo_metadata(RepoMetadata {
+                filepath: "source_code.py".to_string(),
+                ..RepoMetadata::default()
+            });
+        let windows = builder.chunkify(code);
 
         assert_eq!(windows.len(), 18);
 
@@ -542,9 +581,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "java")]
     fn test_chunkify_java() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         let code = r"
 public class Calculator {
@@ -569,9 +607,8 @@ public class Calculator {
     }
 }
 ";
-        let builder = AstChunkBuilder::new(50, Language::Java);
-        let options = ChunkOptions::default();
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let builder = AstChunkBuilder::new(Language::Java).max_chunk_size(50);
+        let windows = builder.chunkify(code);
 
         assert!(!windows.is_empty(), "Java chunking should produce chunks");
         for w in &windows {
@@ -582,9 +619,43 @@ public class Calculator {
     }
 
     #[test]
-    #[cfg(feature = "typescript")]
+    fn test_chunkify_cpp() {
+        use crate::metadata::CodeWindow;
+
+        let code = r"
+#include <iostream>
+
+class Calculator {
+public:
+    int add(int a, int b) {
+        return a + b;
+    }
+
+    int subtract(int a, int b) {
+        return a - b;
+    }
+};
+
+int main() {
+    Calculator calc;
+    std::cout << calc.add(1, 2) << std::endl;
+    return 0;
+}
+";
+        let builder = AstChunkBuilder::new(Language::Cpp).max_chunk_size(50);
+        let windows = builder.chunkify(code);
+
+        assert!(!windows.is_empty(), "C++ chunking should produce chunks");
+        for w in &windows {
+            if let CodeWindow::Standard { content, .. } = w {
+                assert!(!content.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_chunkify_typescript() {
-        use crate::metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+        use crate::metadata::CodeWindow;
 
         let code = r#"
 class Greeter {
@@ -604,14 +675,49 @@ function main() {
     console.log(g.greet());
 }
 "#;
-        let builder = AstChunkBuilder::new(50, Language::TypeScript);
-        let options = ChunkOptions::default();
-        let windows = builder.chunkify(code, MetadataTemplate::Default, &options);
+        let builder = AstChunkBuilder::new(Language::TypeScript).max_chunk_size(50);
+        let windows = builder.chunkify(code);
 
         assert!(
             !windows.is_empty(),
             "TypeScript chunking should produce chunks"
         );
+        for w in &windows {
+            if let CodeWindow::Standard { content, .. } = w {
+                assert!(!content.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunkify_rust() {
+        use crate::metadata::CodeWindow;
+
+        let code = r#"
+pub struct Calculator {
+    value: i32,
+}
+
+impl Calculator {
+    pub fn new(value: i32) -> Self {
+        Self { value }
+    }
+
+    pub fn add(&mut self, x: i32) -> i32 {
+        self.value += x;
+        self.value
+    }
+}
+
+fn main() {
+    let mut calc = Calculator::new(0);
+    println!("{}", calc.add(42));
+}
+"#;
+        let builder = AstChunkBuilder::new(Language::Rust).max_chunk_size(50);
+        let windows = builder.chunkify(code);
+
+        assert!(!windows.is_empty(), "Rust chunking should produce chunks");
         for w in &windows {
             if let CodeWindow::Standard { content, .. } = w {
                 assert!(!content.is_empty());

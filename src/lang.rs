@@ -2,31 +2,43 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     /// Python
-    #[cfg(feature = "python")]
     Python,
     /// Java
-    #[cfg(feature = "java")]
     Java,
+    /// C++
+    Cpp,
+    /// Rust
+    Rust,
     /// C#
-    #[cfg(feature = "csharp")]
     CSharp,
     /// TypeScript / TSX
-    #[cfg(feature = "typescript")]
     TypeScript,
 }
 
 impl Language {
+    /// Detect language from file extension.
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "py" => Some(Self::Python),
+            "java" => Some(Self::Java),
+            "cpp" | "cc" | "cxx" | "c++" | "h" | "hpp" | "hxx" | "hh" => Some(Self::Cpp),
+            "rs" => Some(Self::Rust),
+            "cs" => Some(Self::CSharp),
+            "ts" | "tsx" => Some(Self::TypeScript),
+            _ => None,
+        }
+    }
+
     /// Returns the tree-sitter [`Language`](tree_sitter::Language) for this programming language.
     #[must_use]
     pub fn ts_language(self) -> tree_sitter::Language {
         match self {
-            #[cfg(feature = "python")]
             Self::Python => tree_sitter_python::LANGUAGE.into(),
-            #[cfg(feature = "java")]
             Self::Java => tree_sitter_java::LANGUAGE.into(),
-            #[cfg(feature = "csharp")]
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-            #[cfg(feature = "typescript")]
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
@@ -36,23 +48,27 @@ impl Language {
     #[must_use]
     pub fn ancestor_node_types(self) -> &'static [&'static str] {
         match self {
-            #[cfg(feature = "python")]
             Self::Python => &["class_definition", "function_definition"],
-            #[cfg(feature = "java")]
-            Self::Java => &[
+            Self::Cpp => &[
+                "class_specifier",
+                "function_definition",
+                "namespace_definition",
+                "struct_specifier",
+            ],
+            Self::Rust => &[
+                "impl_item",
+                "function_item",
+                "struct_item",
+                "enum_item",
+                "trait_item",
+                "mod_item",
+            ],
+            Self::Java | Self::CSharp => &[
                 "class_declaration",
                 "method_declaration",
                 "constructor_declaration",
                 "interface_declaration",
             ],
-            #[cfg(feature = "csharp")]
-            Self::CSharp => &[
-                "class_declaration",
-                "method_declaration",
-                "constructor_declaration",
-                "interface_declaration",
-            ],
-            #[cfg(feature = "typescript")]
             Self::TypeScript => &[
                 "class_declaration",
                 "method_definition",
@@ -67,14 +83,11 @@ impl Language {
     #[must_use]
     pub fn root_node_type(self) -> &'static str {
         match self {
-            #[cfg(feature = "python")]
             Self::Python => "module",
-            #[cfg(feature = "java")]
-            Self::Java => "program",
-            #[cfg(feature = "csharp")]
+            Self::Cpp => "translation_unit",
+            Self::Rust => "source_file",
+            Self::Java | Self::TypeScript => "program",
             Self::CSharp => "compilation_unit",
-            #[cfg(feature = "typescript")]
-            Self::TypeScript => "program",
         }
     }
 }

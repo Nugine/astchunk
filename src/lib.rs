@@ -9,11 +9,12 @@
 //! ## Quick start
 //!
 //! ```rust
-//! use astchunk::{AstChunkBuilder, ChunkOptions, Language, MetadataTemplate};
+//! use astchunk::{AstChunkBuilder, Language};
 //!
 //! let code = "def hello():\n    print('hello')\n\ndef world():\n    print('world')\n";
-//! let builder = AstChunkBuilder::new(50, Language::Python);
-//! let chunks = builder.chunkify(code, MetadataTemplate::Default, &ChunkOptions::default());
+//! let chunks = AstChunkBuilder::new(Language::Python)
+//!     .max_chunk_size(50)
+//!     .chunkify(code);
 //! assert!(!chunks.is_empty());
 //! ```
 //!
@@ -21,11 +22,6 @@
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `python` (default) | Python language support |
-//! | `java` | Java language support |
-//! | `csharp` | C# language support |
-//! | `typescript` | TypeScript / TSX support |
-//! | `all-languages` | Enable all language features |
 //! | `cli` | Build the command-line interface |
 
 mod builder;
@@ -38,4 +34,4 @@ mod nws;
 
 pub use builder::AstChunkBuilder;
 pub use lang::Language;
-pub use metadata::{ChunkOptions, CodeWindow, MetadataTemplate};
+pub use metadata::{CodeWindow, MetadataTemplate, RepoMetadata};
