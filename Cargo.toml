@@ -21,10 +21,22 @@ name = "astchunk"
 required-features = ["cli"]
 
 [features]
-default = []
+default = ["python"]
 cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:chrono"]
+python = ["dep:tree-sitter-python"]
+java = ["dep:tree-sitter-java"]
+csharp = ["dep:tree-sitter-c-sharp"]
+typescript = ["dep:tree-sitter-typescript"]
+all-languages = ["python", "java", "csharp", "typescript"]
 
 [dependencies]
+tree-sitter = "0.25"
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 clap = { version = "4.5.60", features = ["derive"], optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "chrono"], optional = true }
