@@ -1,5 +1,10 @@
 # astchunk
 
+[![Crates.io](https://img.shields.io/crates/v/astchunk.svg)](https://crates.io/crates/astchunk)
+[![docs.rs](https://docs.rs/astchunk/badge.svg)](https://docs.rs/astchunk)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
+
 A Rust implementation of AST-based code chunking, reproducing the paper:
 
 > [cAST: Enhancing Code Retrieval-Augmented Generation with Structural Chunking via Abstract Syntax Tree](https://arxiv.org/abs/2506.15655)  
