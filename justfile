@@ -19,3 +19,6 @@ ci:
     just fmt -- --check
     just lint -- -D warnings
     just test
+
+install:
+    cargo install --path . --all-features

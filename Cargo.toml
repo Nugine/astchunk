@@ -16,4 +16,16 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 
+[[bin]]
+name = "astchunk"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:chrono"]
+
 [dependencies]
+clap = { version = "4.5.60", features = ["derive"], optional = true }
+tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "chrono"], optional = true }
+chrono = { version = "0.4.44", optional = true }
