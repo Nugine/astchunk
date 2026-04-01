@@ -1,4 +1,4 @@
-use crate::byte_range::ByteRange;
+use super::byte_range::ByteRange;
 
 /// The set of ASCII whitespace bytes, matching Python's `string.whitespace`:
 /// space (0x20), tab (0x09), newline (0x0A), carriage return (0x0D),

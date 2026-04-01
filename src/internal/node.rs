@@ -1,5 +1,5 @@
-use crate::byte_range::{ByteRange, to_u32};
-use crate::nws::NwsCumsum;
+use super::byte_range::{ByteRange, to_u32};
+use super::nws::NwsCumsum;
 
 /// An AST node wrapper that carries size and ancestor information.
 ///

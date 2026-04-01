@@ -1,3 +1,5 @@
+//! Language definitions and tree-sitter bindings used by the chunking pipeline.
+
 /// Supported programming languages for AST-based chunking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {

@@ -1,35 +1,5 @@
-use crate::lang::Language;
-use crate::node::AstNode;
-use crate::nws::nws_count_direct;
-
-/// A code chunk produced by AST-based chunking.
-///
-/// Contains the rebuilt source text, location metadata, and
-/// ancestor path information. This is the owned output of the
-/// chunking process (no lifetime ties to the tree-sitter tree).
-#[derive(Debug, Clone)]
-pub struct AstChunk {
-    /// Rebuilt source code text for this chunk.
-    pub text: String,
-    /// 0-indexed start line.
-    pub start_line: u32,
-    /// 0-indexed end line.
-    pub end_line: u32,
-    /// Non-whitespace character count of the rebuilt text.
-    pub size: u32,
-    /// Number of AST nodes in this chunk.
-    pub node_count: usize,
-    /// Ancestor path strings (first line of each class/function definition).
-    pub ancestors: Vec<String>,
-}
-
-impl AstChunk {
-    /// Number of lines covered by this chunk.
-    #[must_use]
-    pub fn line_count(&self) -> u32 {
-        self.end_line - self.start_line + 1
-    }
-}
+use crate::internal::byte_range::ByteRange;
+use crate::internal::node::AstNode;
 
 /// Rebuild source code from a window of `AstNode`s.
 ///
@@ -84,59 +54,83 @@ pub fn rebuild_code(window: &[AstNode<'_>], source: &[u8]) -> String {
     code
 }
 
-/// Build ancestor path strings from the ancestor nodes.
-///
-/// Filters ancestors to class/function definitions (based on language)
-/// and extracts the first line of each.
-pub fn build_chunk_ancestors(
-    ancestors: &[tree_sitter::Node<'_>],
-    source: &[u8],
-    language: Language,
-) -> Vec<String> {
-    let types = language.ancestor_node_types();
-    let mut result = Vec::new();
-
-    for ancestor in ancestors {
-        if types.contains(&ancestor.kind()) {
-            let start = ancestor.start_byte();
-            let end = ancestor.end_byte();
-            let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
-            // Extract first line
-            let first_line = text.lines().next().unwrap_or("");
-            result.push(first_line.to_string());
+/// Compute 0-based (line, column) position at a byte offset in source.
+fn byte_offset_position(source: &[u8], offset: usize) -> (u32, u32) {
+    let mut line: u32 = 0;
+    let mut col: u32 = 0;
+    for &b in &source[..offset] {
+        if b == b'\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
         }
     }
-
-    result
+    (line, col)
 }
 
-/// Convert a window of `AstNode`s into an `AstChunk`.
-pub fn build_chunk(window: &[AstNode<'_>], source: &[u8], language: Language) -> AstChunk {
-    assert!(!window.is_empty(), "Cannot build chunk from empty window");
-
-    let text = rebuild_code(window, source);
-    let size = nws_count_direct(&text);
-
-    let start_line = window.first().unwrap().start_line();
-    let end_line = window.last().unwrap().end_line();
-    let node_count = window.len();
-    let ancestors = build_chunk_ancestors(&window[0].ancestors, source, language);
-
-    AstChunk {
-        text,
-        start_line,
-        end_line,
-        size,
-        node_count,
-        ancestors,
+/// Rebuild source code from byte-range segments.
+///
+/// Restores newlines and indentation between segments based on their
+/// positions in the original source.
+pub fn rebuild_from_segments(segments: &[ByteRange], source: &[u8]) -> String {
+    if segments.is_empty() {
+        return String::new();
     }
+
+    let mut code = String::with_capacity(source.len() / 2);
+
+    let mut current_line: u32 = 0;
+    let mut current_col: u32 = 0;
+    let mut first = true;
+
+    for seg in segments {
+        let start = seg.start as usize;
+        let end = seg.end as usize;
+        let seg_text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+
+        let (seg_start_line, seg_start_col) = byte_offset_position(source, start);
+
+        if first {
+            for _ in 0..seg_start_col {
+                code.push(' ');
+            }
+            current_line = seg_start_line;
+            current_col = seg_start_col;
+            first = false;
+        }
+
+        if seg_start_line > current_line {
+            let line_diff = seg_start_line - current_line;
+            for _ in 0..line_diff {
+                code.push('\n');
+            }
+            current_col = 0;
+        }
+
+        if seg_start_col > current_col {
+            let col_diff = seg_start_col - current_col;
+            for _ in 0..col_diff {
+                code.push(' ');
+            }
+        }
+
+        code.push_str(seg_text);
+
+        let (end_line, end_col) = byte_offset_position(source, end);
+        current_line = end_line;
+        current_col = end_col;
+    }
+
+    code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{AstNode, node_nws_size};
-    use crate::nws::NwsCumsum;
+    use crate::internal::byte_range::ByteRange;
+    use crate::internal::node::{AstNode, node_nws_size};
+    use crate::internal::nws::NwsCumsum;
 
     #[test]
     fn test_rebuild_code_simple() {
@@ -197,34 +191,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_chunk_ancestors() {
-        let code = "class MyClass:\n    def method(self):\n        pass\n";
-        let source = code.as_bytes();
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_python::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-
-        let class_def = root.child(0).unwrap();
-        assert_eq!(class_def.kind(), "class_definition");
-
-        let class_body = class_def.child_by_field_name("body").unwrap();
-        let method_def = class_body.named_child(0).unwrap();
-        assert_eq!(method_def.kind(), "function_definition");
-
-        let ancestors_nodes = vec![root, class_def, method_def];
-        let ancestors = build_chunk_ancestors(&ancestors_nodes, source, Language::Python);
-
-        assert_eq!(ancestors.len(), 2); // class and function, but not module
-        assert_eq!(ancestors[0], "class MyClass:");
-        assert_eq!(ancestors[1], "def method(self):");
-    }
-
-    #[test]
-    fn test_build_chunk() {
-        let code = "x = 1\ny = 2\nz = 3\n";
+    fn test_rebuild_from_segments_simple() {
+        let code = "x = 1\ny = 2\n";
         let source = code.as_bytes();
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -239,16 +207,50 @@ mod tests {
 
         let ast_nodes: Vec<AstNode<'_>> = children
             .iter()
-            .map(|c| AstNode::new(*c, node_nws_size(c, &cumsum), vec![root]))
+            .map(|c| AstNode::new(*c, node_nws_size(c, &cumsum), vec![]))
             .collect();
 
-        let chunk = build_chunk(&ast_nodes, source, Language::Python);
+        let segments: Vec<ByteRange> = ast_nodes
+            .iter()
+            .map(|n| ByteRange::from_ts_node(&n.node))
+            .collect();
 
-        assert_eq!(chunk.text, "x = 1\ny = 2\nz = 3");
-        assert_eq!(chunk.start_line, 0);
-        assert_eq!(chunk.end_line, 2);
-        assert_eq!(chunk.node_count, 3);
-        assert!(chunk.size > 0);
-        assert_eq!(chunk.line_count(), 3);
+        let from_nodes = rebuild_code(&ast_nodes, source);
+        let from_segments = rebuild_from_segments(&segments, source);
+        assert_eq!(from_nodes, from_segments);
+    }
+
+    #[test]
+    fn test_rebuild_from_segments_indented() {
+        let code = "def foo():\n    x = 1\n    y = 2\n";
+        let source = code.as_bytes();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let cumsum = NwsCumsum::new(source);
+
+        let func_def = root.child(0).unwrap();
+        let block = func_def.child_by_field_name("body").unwrap();
+        let mut cursor = block.walk();
+        let stmts: Vec<_> = block.children(&mut cursor).collect();
+        let named_stmts: Vec<_> = stmts.iter().filter(|n| n.is_named()).copied().collect();
+
+        let ancestors = vec![root, func_def];
+        let ast_nodes: Vec<AstNode<'_>> = named_stmts
+            .iter()
+            .map(|c| AstNode::new(*c, node_nws_size(c, &cumsum), ancestors.clone()))
+            .collect();
+
+        let segments: Vec<ByteRange> = ast_nodes
+            .iter()
+            .map(|n| ByteRange::from_ts_node(&n.node))
+            .collect();
+
+        let from_nodes = rebuild_code(&ast_nodes, source);
+        let from_segments = rebuild_from_segments(&segments, source);
+        assert_eq!(from_nodes, from_segments);
     }
 }

@@ -1,7 +1,12 @@
 use std::fmt::Write as _;
 use std::io::Read;
 
-use astchunk::{AstChunkBuilder, CodeWindow, Language, MetadataTemplate};
+use astchunk::chunker::{CastChunker, CastChunkerOptions, Chunker};
+use astchunk::formatter::{CanonicalFormatter, ContextualFormatter, Formatter};
+use astchunk::lang::Language;
+use astchunk::output::{JsonRecord, RepoEvalRecord, SwebenchLiteRecord};
+use astchunk::types::{AstChunk, Document, DocumentId, Origin, TextChunk};
+use bytestring::ByteString;
 use clap::Parser;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
@@ -36,24 +41,13 @@ impl LangArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default, PartialEq, Eq)]
 enum TemplateArg {
     None,
     #[default]
     Default,
     RepoEval,
     SwebenchLite,
-}
-
-impl TemplateArg {
-    const fn into_template(self) -> MetadataTemplate {
-        match self {
-            Self::None => MetadataTemplate::None,
-            Self::Default => MetadataTemplate::Default,
-            Self::RepoEval => MetadataTemplate::CodeRagBenchRepoEval,
-            Self::SwebenchLite => MetadataTemplate::CodeRagBenchSwebenchLite,
-        }
-    }
 }
 
 #[derive(Debug, Parser)]
@@ -80,9 +74,17 @@ struct Cli {
     #[arg(long)]
     expansion: bool,
 
-    /// Metadata template
+    /// Export format for JSON output
     #[arg(short, long, value_enum, default_value = "default")]
     template: TemplateArg,
+
+    /// Repository name used in output metadata (required for `repo-eval`)
+    #[arg(long)]
+    repo: Option<String>,
+
+    /// Logical source path to use for stdin input metadata
+    #[arg(long)]
+    stdin_path: Option<camino::Utf8PathBuf>,
 
     /// Output as JSON
     #[arg(long, conflicts_with = "brief")]
@@ -120,51 +122,60 @@ fn init_tracing(debug: bool) {
         .init();
 }
 
-/// Extract display-friendly metadata from a `CodeWindow`.
+fn validate_cli(cli: &Cli) -> Result<(), String> {
+    if !cli.files.is_empty() && cli.stdin_path.is_some() {
+        return Err("--stdin-path can only be used when reading from stdin".to_string());
+    }
+
+    if cli.template == TemplateArg::RepoEval && cli.repo.is_none() {
+        return Err("--repo is required with --template repo-eval".to_string());
+    }
+
+    if cli.files.is_empty()
+        && cli.stdin_path.is_none()
+        && matches!(
+            cli.template,
+            TemplateArg::RepoEval | TemplateArg::SwebenchLite
+        )
+    {
+        return Err(format!(
+            "--stdin-path is required with --template {} when reading from stdin",
+            match cli.template {
+                TemplateArg::RepoEval => "repo-eval",
+                TemplateArg::SwebenchLite => "swebench-lite",
+                TemplateArg::None | TemplateArg::Default => unreachable!(),
+            }
+        ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+/// Display-friendly metadata extracted from `AstChunk` + `TextChunk`.
 struct ChunkInfo {
     index: usize,
     content: String,
-    line_count: String,
-    nws_size: String,
-    node_count: String,
-    start_line: String,
-    end_line: String,
+    line_count: u32,
+    nws_size: u32,
+    node_count: u32,
+    start_line: u32,
+    end_line: u32,
 }
 
-fn extract_chunk_info(window: &CodeWindow, index: usize) -> ChunkInfo {
-    match window {
-        CodeWindow::Standard { content, metadata } => ChunkInfo {
-            index,
-            content: content.clone(),
-            line_count: metadata
-                .get("line_count")
-                .map_or_else(|| "—".into(), std::string::ToString::to_string),
-            nws_size: metadata
-                .get("chunk_size")
-                .map_or_else(|| "—".into(), std::string::ToString::to_string),
-            node_count: metadata
-                .get("node_count")
-                .map_or_else(|| "—".into(), std::string::ToString::to_string),
-            start_line: metadata
-                .get("start_line_no")
-                .map_or_else(|| "—".into(), std::string::ToString::to_string),
-            end_line: metadata
-                .get("end_line_no")
-                .map_or_else(|| "—".into(), std::string::ToString::to_string),
-        },
-        CodeWindow::SwebenchLite {
-            _id: id,
-            title,
-            text,
-        } => ChunkInfo {
-            index,
-            content: text.clone(),
-            line_count: "—".into(),
-            nws_size: "—".into(),
-            node_count: "—".into(),
-            start_line: format!("{title} ({id})"),
-            end_line: "—".into(),
-        },
+fn extract_chunk_info(ast_chunk: &AstChunk, text_chunk: &TextChunk, index: usize) -> ChunkInfo {
+    let line_numbers = text_chunk.source_line_index_range.to_line_number_range();
+    ChunkInfo {
+        index,
+        content: text_chunk.content.to_string(),
+        line_count: text_chunk.metrics.content_line_count,
+        nws_size: ast_chunk.metrics.nws_size,
+        node_count: ast_chunk.metrics.node_count,
+        start_line: line_numbers.start,
+        end_line: line_numbers.end,
     }
 }
 
@@ -233,11 +244,11 @@ fn build_summary_table(infos: &[ChunkInfo], brief: bool) -> Table {
     for info in infos {
         let mut row = vec![
             (info.index + 1).to_string(),
-            info.line_count.clone(),
-            info.nws_size.clone(),
-            info.node_count.clone(),
-            info.start_line.clone(),
-            info.end_line.clone(),
+            info.line_count.to_string(),
+            info.nws_size.to_string(),
+            info.node_count.to_string(),
+            info.start_line.to_string(),
+            info.end_line.to_string(),
         ];
         if brief {
             row.push(first_code_line(&info.content));
@@ -263,25 +274,149 @@ fn format_chunk(info: &ChunkInfo, total: usize, include_code: bool) -> String {
         return header;
     }
 
-    let start_line: usize = info.start_line.parse().unwrap_or(0);
-    let end_line: usize = info.end_line.parse().unwrap_or(0);
-    let width = (end_line + 1).max(1).to_string().len();
+    let width = (info.end_line + 1).max(1).to_string().len();
 
     let mut out = header;
     for (i, line) in info.content.lines().enumerate() {
-        write!(out, "\n {:>width$} │ {line}", start_line + i).unwrap();
+        let line_no = info.start_line as usize + i;
+        write!(out, "\n {line_no:>width$} │ {line}").unwrap();
     }
     out
 }
 
-fn print_table_output(windows: &[CodeWindow], lang_str: &str, cli: &Cli) {
-    let infos: Vec<ChunkInfo> = windows
+// ---------------------------------------------------------------------------
+// Processing pipeline
+// ---------------------------------------------------------------------------
+
+/// Processed results for a single file/stdin source.
+struct ProcessedFile {
+    file: String,
+    lang_str: String,
+    document: Document,
+    ast_chunks: Vec<AstChunk>,
+    text_chunks: Vec<TextChunk>,
+}
+
+fn build_chunker(cli: &Cli) -> CastChunker {
+    let mut options = CastChunkerOptions::default();
+    options.max_nws_size = cli.max_chunk_size;
+    options.overlap_nodes = cli.overlap;
+    CastChunker::new(options)
+}
+
+fn build_formatter(cli: &Cli) -> Box<dyn Formatter> {
+    if cli.expansion {
+        Box::new(ContextualFormatter::default())
+    } else {
+        Box::new(CanonicalFormatter::default())
+    }
+}
+
+fn build_origin_for_file(path: &camino::Utf8Path, cli: &Cli) -> Origin {
+    Origin {
+        path: Some(ByteString::from(path.as_str())),
+        repo: cli.repo.as_deref().map(ByteString::from),
+        revision: None,
+    }
+}
+
+fn build_origin_for_stdin(cli: &Cli) -> Origin {
+    Origin {
+        path: cli
+            .stdin_path
+            .as_deref()
+            .map(|path| ByteString::from(path.as_str())),
+        repo: cli.repo.as_deref().map(ByteString::from),
+        revision: None,
+    }
+}
+
+fn process_file(
+    path: &camino::Utf8Path,
+    language: Language,
+    document_id: DocumentId,
+    cli: &Cli,
+) -> ProcessedFile {
+    let code = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error: failed to read {path}: {e}");
+        std::process::exit(1);
+    });
+
+    let document = Document {
+        document_id,
+        language,
+        source: ByteString::from(code),
+        origin: build_origin_for_file(path, cli),
+    };
+
+    let chunker = build_chunker(cli);
+    let ast_chunks = chunker.chunk(&document).unwrap_or_else(|e| {
+        eprintln!("Error: chunking failed for {path}: {e}");
+        std::process::exit(1);
+    });
+
+    let formatter = build_formatter(cli);
+    let text_chunks = formatter
+        .format(&document, &ast_chunks)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: formatting failed for {path}: {e}");
+            std::process::exit(1);
+        });
+
+    ProcessedFile {
+        file: path.to_string(),
+        lang_str: format!("{language:?}"),
+        document,
+        ast_chunks,
+        text_chunks,
+    }
+}
+
+fn process_stdin(language: Language, code: String, cli: &Cli) -> ProcessedFile {
+    let document = Document {
+        document_id: DocumentId(0),
+        language,
+        source: ByteString::from(code),
+        origin: build_origin_for_stdin(cli),
+    };
+
+    let chunker = build_chunker(cli);
+    let ast_chunks = chunker.chunk(&document).unwrap_or_else(|e| {
+        eprintln!("Error: chunking failed: {e}");
+        std::process::exit(1);
+    });
+
+    let formatter = build_formatter(cli);
+    let text_chunks = formatter
+        .format(&document, &ast_chunks)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: formatting failed: {e}");
+            std::process::exit(1);
+        });
+
+    ProcessedFile {
+        file: "<stdin>".to_string(),
+        lang_str: format!("{language:?}"),
+        document,
+        ast_chunks,
+        text_chunks,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table / brief output
+// ---------------------------------------------------------------------------
+
+fn print_table_output(processed: &ProcessedFile, cli: &Cli) {
+    let infos: Vec<ChunkInfo> = processed
+        .ast_chunks
         .iter()
+        .zip(&processed.text_chunks)
         .enumerate()
-        .map(|(i, w)| extract_chunk_info(w, i))
+        .map(|(i, (ac, tc))| extract_chunk_info(ac, tc, i))
         .collect();
 
-    let params = build_params_table(lang_str, cli, infos.len());
+    let params = build_params_table(&processed.lang_str, cli, infos.len());
     println!("{params}");
 
     let summary = build_summary_table(&infos, cli.brief);
@@ -295,6 +430,107 @@ fn print_table_output(windows: &[CodeWindow], lang_str: &str, cli: &Cli) {
         println!("{}\n", format_chunk(info, infos.len(), true));
     }
 }
+
+/// Print table/brief output for a single chunk identified by `--chunk-id`.
+fn print_single_chunk(processed: &ProcessedFile, chunk_id: usize, cli: &Cli) {
+    let total = processed.ast_chunks.len();
+    if chunk_id == 0 || chunk_id > total {
+        eprintln!("Error: --chunk-id {chunk_id} is out of range [1, {total}]");
+        std::process::exit(1);
+    }
+    let idx = chunk_id - 1;
+    let info = extract_chunk_info(&processed.ast_chunks[idx], &processed.text_chunks[idx], idx);
+
+    let params = build_params_table(&processed.lang_str, cli, total);
+    println!("{params}");
+
+    println!("{}", format_chunk(&info, total, !cli.brief));
+}
+
+// ---------------------------------------------------------------------------
+// JSON output
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct FileResult {
+    file: String,
+    chunks: serde_json::Value,
+}
+
+fn export_json(processed: &ProcessedFile, template: TemplateArg) -> serde_json::Value {
+    match template {
+        TemplateArg::RepoEval => {
+            let records = RepoEvalRecord::build(
+                &processed.document,
+                &processed.ast_chunks,
+                &processed.text_chunks,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: export failed: {e}");
+                std::process::exit(1);
+            });
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+        TemplateArg::SwebenchLite => {
+            let records =
+                SwebenchLiteRecord::build(&processed.document, &processed.text_chunks, "")
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: export failed: {e}");
+                        std::process::exit(1);
+                    });
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+        TemplateArg::Default | TemplateArg::None => {
+            let records = JsonRecord::build(
+                &processed.document,
+                &processed.ast_chunks,
+                &processed.text_chunks,
+            );
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+    }
+}
+
+fn export_json_single_chunk(
+    processed: &ProcessedFile,
+    template: TemplateArg,
+    chunk_id: usize,
+) -> serde_json::Value {
+    let total = processed.ast_chunks.len();
+    if chunk_id == 0 || chunk_id > total {
+        eprintln!("Error: --chunk-id {chunk_id} is out of range [1, {total}]");
+        std::process::exit(1);
+    }
+    let idx = chunk_id - 1;
+    let ac = &processed.ast_chunks[idx..=idx];
+    let tc = &processed.text_chunks[idx..=idx];
+
+    match template {
+        TemplateArg::RepoEval => {
+            let records = RepoEvalRecord::build(&processed.document, ac, tc).unwrap_or_else(|e| {
+                eprintln!("Error: export failed: {e}");
+                std::process::exit(1);
+            });
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+        TemplateArg::SwebenchLite => {
+            let records =
+                SwebenchLiteRecord::build(&processed.document, tc, "").unwrap_or_else(|e| {
+                    eprintln!("Error: export failed: {e}");
+                    std::process::exit(1);
+                });
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+        TemplateArg::Default | TemplateArg::None => {
+            let records = JsonRecord::build(&processed.document, ac, tc);
+            serde_json::to_value(&records).expect("serialization failed")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File discovery
+// ---------------------------------------------------------------------------
 
 /// Known file extensions for language auto-detection.
 const KNOWN_EXTENSIONS: &[&str] = &[
@@ -349,47 +585,76 @@ fn resolve_language(path: &camino::Utf8Path, explicit: Option<LangArg>) -> Optio
     detected
 }
 
-/// Result of processing a single file.
-#[derive(serde::Serialize)]
-struct FileResult {
-    file: String,
-    chunks: Vec<CodeWindow>,
-}
+// ---------------------------------------------------------------------------
+// Output routing
+// ---------------------------------------------------------------------------
 
-/// Process a single file: read, parse, chunkify, and return the windows.
-fn process_file(path: &camino::Utf8Path, language: Language, cli: &Cli) -> Vec<CodeWindow> {
-    let code = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Error: failed to read {path}: {e}");
-        std::process::exit(1);
-    });
-    AstChunkBuilder::new(language)
-        .max_chunk_size(cli.max_chunk_size)
-        .chunk_overlap(cli.overlap)
-        .chunk_expansion(cli.expansion)
-        .template(cli.template.into_template())
-        .chunkify(&code)
-}
-
-/// Print table/brief output for a single chunk identified by `--chunk-id`.
-fn print_single_chunk(windows: &[CodeWindow], chunk_id: usize, lang_str: &str, cli: &Cli) {
-    if chunk_id == 0 || chunk_id > windows.len() {
-        eprintln!(
-            "Error: --chunk-id {chunk_id} is out of range [1, {}]",
-            windows.len()
-        );
-        std::process::exit(1);
+/// Output results for a single source (stdin or one file).
+fn output_single(cli: &Cli, processed: &ProcessedFile) {
+    if let Some(id) = cli.chunk_id {
+        if cli.json {
+            let chunks = export_json_single_chunk(processed, cli.template, id);
+            let result = vec![FileResult {
+                file: processed.file.clone(),
+                chunks,
+            }];
+            let json = serde_json::to_string_pretty(&result).expect("serialization failed");
+            println!("{json}");
+        } else {
+            print_single_chunk(processed, id, cli);
+        }
+    } else if cli.json {
+        let chunks = export_json(processed, cli.template);
+        let result = vec![FileResult {
+            file: processed.file.clone(),
+            chunks,
+        }];
+        let json = serde_json::to_string_pretty(&result).expect("serialization failed");
+        println!("{json}");
+    } else {
+        print_table_output(processed, cli);
     }
-    let window = &windows[chunk_id - 1];
-    let info = extract_chunk_info(window, chunk_id - 1);
-
-    let params = build_params_table(lang_str, cli, windows.len());
-    println!("{params}");
-
-    println!("{}", format_chunk(&info, windows.len(), !cli.brief));
 }
+
+/// Output results for multiple files.
+fn output_multi(cli: &Cli, results: &[ProcessedFile]) {
+    if cli.json {
+        let json_results: Vec<FileResult> = results
+            .iter()
+            .map(|p| FileResult {
+                file: p.file.clone(),
+                chunks: export_json(p, cli.template),
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&json_results).expect("serialization failed");
+        println!("{json}");
+    } else {
+        let mut first = true;
+        for processed in results {
+            if !first {
+                println!();
+            }
+            first = false;
+            println!("=== file: {} ===", processed.file);
+            if let Some(id) = cli.chunk_id {
+                print_single_chunk(processed, id, cli);
+            } else {
+                print_table_output(processed, cli);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() {
     let cli = Cli::parse();
+    if let Err(err) = validate_cli(&cli) {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
     init_tracing(cli.debug);
 
     if cli.files.is_empty() {
@@ -405,13 +670,8 @@ fn main() {
             .read_to_string(&mut buf)
             .expect("failed to read stdin");
 
-        let windows = AstChunkBuilder::new(language)
-            .max_chunk_size(cli.max_chunk_size)
-            .chunk_overlap(cli.overlap)
-            .chunk_expansion(cli.expansion)
-            .template(cli.template.into_template())
-            .chunkify(&buf);
-        output_single(&cli, &windows, &format!("{language:?}"), "<stdin>");
+        let processed = process_stdin(language, buf, &cli);
+        output_single(&cli, &processed);
     } else {
         // --- file/directory mode ---
         let files = expand_paths(&cli.files);
@@ -433,83 +693,98 @@ fn main() {
             .collect();
 
         // Process files in parallel.
-        let mut results: Vec<(String, String, Vec<CodeWindow>)> = resolved
+        let mut results: Vec<ProcessedFile> = resolved
             .par_iter()
-            .map(|(path, language)| {
-                let windows = process_file(path.as_ref(), *language, &cli);
-                (path.to_string(), format!("{language:?}"), windows)
+            .enumerate()
+            .map(|(i, (path, language))| {
+                let doc_id = DocumentId(u32::try_from(i).expect("too many files"));
+                process_file(path.as_ref(), *language, doc_id, &cli)
             })
             .collect();
 
         // Sort by path for deterministic output.
-        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results.sort_by(|a, b| a.file.cmp(&b.file));
 
         if results.len() == 1 {
-            let (ref path, ref lang_str, ref windows) = results[0];
-            output_single(&cli, windows, lang_str, path);
+            output_single(&cli, &results[0]);
         } else {
             output_multi(&cli, &results);
         }
     }
 }
 
-/// Output results for a single source (stdin or one file).
-fn output_single(cli: &Cli, windows: &[CodeWindow], lang_str: &str, file_name: &str) {
-    if let Some(id) = cli.chunk_id {
-        if cli.json {
-            if id == 0 || id > windows.len() {
-                eprintln!(
-                    "Error: --chunk-id {id} is out of range [1, {}]",
-                    windows.len()
-                );
-                std::process::exit(1);
-            }
-            let result = vec![FileResult {
-                file: file_name.to_string(),
-                chunks: vec![windows[id - 1].clone()],
-            }];
-            let json = serde_json::to_string_pretty(&result).expect("failed to serialize");
-            println!("{json}");
-        } else {
-            print_single_chunk(windows, id, lang_str, cli);
-        }
-    } else if cli.json {
-        let result = vec![FileResult {
-            file: file_name.to_string(),
-            chunks: windows.to_vec(),
-        }];
-        let json = serde_json::to_string_pretty(&result).expect("failed to serialize");
-        println!("{json}");
-    } else {
-        print_table_output(windows, lang_str, cli);
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Output results for multiple files.
-fn output_multi(cli: &Cli, results: &[(String, String, Vec<CodeWindow>)]) {
-    if cli.json {
-        let json_results: Vec<FileResult> = results
-            .iter()
-            .map(|(path, _lang, windows)| FileResult {
-                file: path.clone(),
-                chunks: windows.clone(),
-            })
-            .collect();
-        let json = serde_json::to_string_pretty(&json_results).expect("failed to serialize");
-        println!("{json}");
-    } else {
-        let mut first = true;
-        for (path, lang_str, windows) in results {
-            if !first {
-                println!();
-            }
-            first = false;
-            println!("=== file: {path} ===");
-            if let Some(id) = cli.chunk_id {
-                print_single_chunk(windows, id, lang_str, cli);
-            } else {
-                print_table_output(windows, lang_str, cli);
-            }
+    fn make_cli() -> Cli {
+        Cli {
+            debug: false,
+            language: None,
+            max_chunk_size: 1500,
+            overlap: 0,
+            expansion: false,
+            template: TemplateArg::Default,
+            repo: None,
+            stdin_path: None,
+            json: false,
+            brief: false,
+            chunk_id: None,
+            files: vec![],
         }
+    }
+
+    #[test]
+    fn validate_repo_eval_requires_repo() {
+        let mut cli = make_cli();
+        cli.template = TemplateArg::RepoEval;
+        cli.files.push("src/lib.rs".into());
+
+        let err = validate_cli(&cli).unwrap_err();
+        assert_eq!(err, "--repo is required with --template repo-eval");
+    }
+
+    #[test]
+    fn validate_repo_eval_stdin_requires_path() {
+        let mut cli = make_cli();
+        cli.template = TemplateArg::RepoEval;
+        cli.repo = Some("astchunk".to_string());
+
+        let err = validate_cli(&cli).unwrap_err();
+        assert_eq!(
+            err,
+            "--stdin-path is required with --template repo-eval when reading from stdin"
+        );
+    }
+
+    #[test]
+    fn validate_stdin_path_rejected_for_file_mode() {
+        let mut cli = make_cli();
+        cli.stdin_path = Some("src/lib.rs".into());
+        cli.files.push("src/main.rs".into());
+
+        let err = validate_cli(&cli).unwrap_err();
+        assert_eq!(err, "--stdin-path can only be used when reading from stdin");
+    }
+
+    #[test]
+    fn build_origin_for_file_includes_repo_metadata() {
+        let mut cli = make_cli();
+        cli.repo = Some("astchunk".to_string());
+
+        let origin = build_origin_for_file(camino::Utf8Path::new("src/lib.rs"), &cli);
+        assert_eq!(origin.path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(origin.repo.as_deref(), Some("astchunk"));
+    }
+
+    #[test]
+    fn build_origin_for_stdin_uses_cli_metadata() {
+        let mut cli = make_cli();
+        cli.repo = Some("astchunk".to_string());
+        cli.stdin_path = Some("src/from_stdin.py".into());
+
+        let origin = build_origin_for_stdin(&cli);
+        assert_eq!(origin.path.as_deref(), Some("src/from_stdin.py"));
+        assert_eq!(origin.repo.as_deref(), Some("astchunk"));
     }
 }
